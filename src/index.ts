@@ -59,6 +59,8 @@ class NotebookLMMCPServer {
   private library: NotebookLibrary;
   private toolHandlers: ToolHandlers;
   private toolDefinitions: Tool[];
+  private lastActivity: number = Date.now();
+  private watchdogInterval: NodeJS.Timeout | null = null;
 
   constructor() {
     // Initialize MCP Server
@@ -339,6 +341,7 @@ class NotebookLMMCPServer {
 
     // Handle tool calls
     this.server.setRequestHandler(CallToolRequestSchema, async (request) => {
+      this.lastActivity = Date.now();
       const { name, arguments: args } = request.params;
       const progressToken = (args as any)?._meta?.progressToken;
 
@@ -545,6 +548,11 @@ class NotebookLMMCPServer {
       }
       shuttingDown = true;
 
+      if (this.watchdogInterval) {
+        clearInterval(this.watchdogInterval);
+        this.watchdogInterval = null;
+      }
+
       log.info(`\n🛑 Received ${signal}, shutting down gracefully...`);
 
       try {
@@ -568,6 +576,22 @@ class NotebookLMMCPServer {
 
     process.on("SIGINT", () => requestShutdown("SIGINT"));
     process.on("SIGTERM", () => requestShutdown("SIGTERM"));
+
+    // The MCP client (Claude Desktop/Code) signals disconnect by closing the stdio pipe,
+    // not by sending a signal. Without these handlers the process stays alive because
+    // Patchright/Chromium keeps the event loop running. See upstream issue #29.
+    process.stdin.on("end", () => requestShutdown("stdin-end"));
+    process.stdin.on("close", () => requestShutdown("stdin-close"));
+
+    // Defensive watchdog for edge cases where stdin events don't fire.
+    // .unref() so this timer alone never keeps the process alive.
+    this.watchdogInterval = setInterval(() => {
+      if (Date.now() - this.lastActivity > 30 * 60 * 1000) {
+        log.warning("🐕 Watchdog: no MCP activity for 30 min, shutting down");
+        requestShutdown("watchdog-idle");
+      }
+    }, 60_000);
+    this.watchdogInterval.unref();
 
     process.on("uncaughtException", (error) => {
       log.error(`💥 Uncaught exception: ${error}`);

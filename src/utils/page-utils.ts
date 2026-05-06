@@ -12,6 +12,7 @@
 
 import type { Page } from "patchright";
 import { log } from "./logger.js";
+import { sleep } from "./stealth-utils.js";
 
 // ============================================================================
 // Constants
@@ -209,6 +210,13 @@ export async function waitForLatestAnswer(
   while (Date.now() < deadline) {
     pollCount++;
 
+    // Bug #16 fix: bail out if the page was closed (browser context died).
+    // Without this, extractLatestText keeps throwing and the loop busy-spins.
+    if (page.isClosed()) {
+      log.warning("🚨 Page closed during waitForLatestAnswer, exiting loop");
+      return null;
+    }
+
     // Extract latest NEW text
     const candidate = await extractLatestText(
       page,
@@ -227,7 +235,7 @@ export async function waitForLatestAnswer(
           if (debug && pollCount % 5 === 0) {
             log.debug("🔍 [DEBUG] Found placeholder, continuing...");
           }
-          await page.waitForTimeout(250);
+          await sleep(250);
           continue;
         }
 
@@ -237,7 +245,7 @@ export async function waitForLatestAnswer(
             log.debug("🔍 [DEBUG] Found question echo, ignoring");
           }
           knownHashes.add(hashString(normalized)); // Mark as seen
-          await page.waitForTimeout(pollIntervalMs);
+          await sleep(pollIntervalMs);
           continue;
         }
 
@@ -273,7 +281,7 @@ export async function waitForLatestAnswer(
       }
     }
 
-    await page.waitForTimeout(pollIntervalMs);
+    await sleep(pollIntervalMs);
   }
 
   if (debug) {
